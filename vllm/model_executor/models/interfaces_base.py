@@ -32,19 +32,13 @@ else:
 
 logger = init_logger(__name__)
 
-# The type of hidden states
-# Currently, T = torch.Tensor for all models except for Medusa
-# which has T = list[torch.Tensor]
-T = TypeVar("T", default=torch.Tensor)
-T_co = TypeVar("T_co", default=torch.Tensor, covariant=True)
-
 # NOTE: Unlike those in `interfaces.py`, we don't define `ClassVar` tags
 # for the base interfaces to avoid breaking OOT registration for existing models
 # that don't inherit from the base interface classes
 
 
 @runtime_checkable
-class VllmModel(Protocol[T_co]):
+class VllmModel(Protocol):
     """The interface required for all models in vLLM."""
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None: ...
@@ -53,11 +47,13 @@ class VllmModel(Protocol[T_co]):
         """Apply token embeddings to `input_ids`."""
         ...
 
-    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor) -> T_co: ...
+    def forward(
+        self, input_ids: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor: ...
 
 
 def _check_vllm_model_init(model: type[object] | object) -> bool:
-    model_init = model.__init__
+    model_init = getattr(model, "__init__")  # noqa: B009
     return supports_kw(model_init, "vllm_config")
 
 
@@ -111,13 +107,13 @@ def is_vllm_model(
 
 
 @runtime_checkable
-class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
+class VllmModelForTextGeneration(VllmModel, Protocol):
     """The interface required for all generative models in vLLM."""
 
     def compute_logits(
         self,
-        hidden_states: T,
-    ) -> T | None:
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
         """Return `None` if TP rank > 0."""
         ...
 
@@ -145,7 +141,7 @@ def is_text_generation_model(
 
 
 @runtime_checkable
-class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
+class VllmModelForPooling(VllmModel, Protocol):
     """The interface required for all pooling models in vLLM."""
 
     is_pooling_model: ClassVar[Literal[True]] = True
@@ -274,10 +270,11 @@ def get_attn_type(model: type[object] | object) -> AttnTypeStr:
 
 
 def get_score_type(model: type[object] | object) -> ScoreType:
-    score_types = set()
-    for m in model.__mro__:
-        score_type = getattr(m, "score_type", "bi-encoder")
+    score_types: set[ScoreType] = set()
+    model_cls = model if isinstance(model, type) else type(model)
+    for m in model_cls.__mro__:
+        score_type: ScoreType = getattr(m, "score_type", "bi-encoder")
         if score_type != "bi-encoder":
             score_types.add(score_type)
     assert len(score_types) < 2
-    return "bi-encoder" if not score_types else list(score_types)[0]
+    return "bi-encoder" if not score_types else next(iter(score_types))
